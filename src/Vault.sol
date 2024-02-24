@@ -6,10 +6,20 @@ import "@openzeppelin/contracts/interfaces/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
+interface IPosition{
+    function setLiquidatorFeePercentage(uint8 _percentage) external returns(bool);
+    function openLongPosition(uint _size,uint _collateral) external returns(uint);
+    function increasePositionSize(uint _id,uint _size) external returns(bool);
+    function increasePositionCollateral(uint _id,uint _collateral) external  returns(bool);
+    function openShortPosition(uint _size,uint _collateral) external  returns(uint);
+    function decreaseSize(uint _id,uint _size) external returns(bool);
+    function decreaseCollateral(uint _id,uint _collateral) external returns(bool);
+    function totalOpenIntrest() external view returns(uint);
+    function liquidate(uint _id) external returns(bool);   
+}
 contract Vault is IERC4626, ERC20, Ownable {
-    IERC20 public immutable asset;
+    IERC20  immutable _Asset;
     address internal Positions;
-    uint internal totalAssetsLocked;
     uint public maxUtilityPercentage;
 
     constructor(
@@ -17,12 +27,12 @@ contract Vault is IERC4626, ERC20, Ownable {
         string memory _name,
         string memory _symbol,
         uint _maxUtilityPercentage
-    ) ERC20(_name, _symbol) {
-        asset = _asset;
+    ) ERC20(_name, _symbol) Ownable(msg.sender){
+        _Asset = _asset;
         maxUtilityPercentage = _maxUtilityPercentage;
     }
 
-    modifier validAddress(address receiver) {
+    modifier ValidAddress(address receiver) {
         require(receiver != address(0));
         _;
     }
@@ -30,10 +40,10 @@ contract Vault is IERC4626, ERC20, Ownable {
     function deposit(
         uint256 assets,
         address receiver
-    ) external returns (uint shares) {
-        uint shares = previewDeposit(assets);
-        _deposit(msg.sender, receiver, shares, assets);
-        return shares;
+    ) external returns (uint) {
+        uint _shares = previewDeposit(assets);
+        _deposit(msg.sender, receiver, _shares, assets);
+        return _shares;
     }
 
     function _deposit(
@@ -41,19 +51,18 @@ contract Vault is IERC4626, ERC20, Ownable {
         address reciever,
         uint shares,
         uint assets
-    ) internal ValidAddress(receiver) {
-        asset.TransferFrom(sender, address(this), assets);
-        totalAssetsLocked += assets;
+    ) internal ValidAddress(reciever) {
+        _Asset.transferFrom(sender, address(this), assets);
         _mint(reciever, shares);
-        emit Deposit(msg.sender, receiver, assets, shares);
+        emit Deposit(msg.sender, reciever, assets, shares);
     }
 
     function mint(
         uint shares,
         address receiver
-    ) external returns (uint256 assets) {
+    ) external returns (uint256) {
         uint _assets = previewMint(shares);
-        _deposit(msg.sender, receiver, _owner, shares_assets);
+        _deposit(msg.sender, receiver, shares,_assets);
         return _assets;
     }
 
@@ -61,17 +70,17 @@ contract Vault is IERC4626, ERC20, Ownable {
         uint256 assets,
         address receiver,
         address _owner
-    ) external returns (uint256 shares) {
+    ) external returns (uint256) {
         uint shares = previewWithdraw(assets);
-        _withdraw(msg.sender, receiver, shares, assets);
+        _withdraw(msg.sender, receiver,_owner, shares, assets);
         return shares;
     }
 
     function redeem(
         uint256 shares,
-        address receiver,
+        address reciever,
         address _owner
-    ) external returns (uint256 assets) {
+    ) external returns (uint256) {
         uint _assets = previewRedeem(shares);
         _withdraw(msg.sender, reciever, _owner, shares, _assets);
         return _assets;
@@ -83,24 +92,23 @@ contract Vault is IERC4626, ERC20, Ownable {
         address _owner,
         uint shares,
         uint assets
-    ) internal ValidAddress(receiver) returns (uint shares) {
+    ) internal ValidAddress(receiver) returns (uint) {
         if (caller != _owner) {
-            _spendeAllownace(_owner, caller, shares);
+            _spendAllowance(_owner, caller, shares);
         }
         _burn(_owner, shares);
-        asset.transfer(address(this), receiver, assets);
-        totalAssetsLocked -= assets;
+        _Asset.transfer(receiver, assets);
         emit Withdraw(caller, receiver, _owner, assets, shares);
         _checkWithdraw();
         return shares;
     }
 
-    function _Asset() public view returns (address) {
-        return address(asset);
+    function asset() public view returns (address) {
+        return address(_Asset);
     }
 
     function totalAssets() public view returns (uint256) {
-        return asset.balanceOf(address(this));
+        return _Asset.balanceOf(address(this));
     }
 
     function convertToShares(uint256 Assets) public view returns (uint256) {
@@ -121,77 +129,72 @@ contract Vault is IERC4626, ERC20, Ownable {
 
     function maxWithdraw(
         address _owner
-    ) external view returns (uint256 maxAssets) {
-        return _covertToShares(balanceOf(_owner), 0);
+    ) external view returns (uint256 ) {
+        return _convertToShares(balanceOf(_owner), 0);
     }
 
     function maxRedeem(
         address _owner
-    ) external view returns (uint256 maxShares) {
+    ) external view returns (uint256) {
         return balanceOf(_owner);
     }
 
     function previewDeposit(uint _asset) public view returns (uint) {
-        _convertToShares(_assets, 0);
+        return _convertToShares(_asset, 0);
     }
 
     function previewMint(uint shares) public view returns (uint) {
-        _convertToAssets(shares, 1);
+       return  _convertToAssets(shares, 1);
     }
 
     function previewWithdraw(uint assets) public view returns (uint) {
-        _convertToShares(Assets, 0);
+       return  _convertToShares(assets, 0);
     }
 
     function previewRedeem(uint shares) public view returns (uint) {
-        _convertToAssets(shares, 1);
+       return _convertToAssets(shares, 1);
     }
 
-    function _convertToShare(
+    function _convertToShares(
         uint assets,
         uint8 rounding
-    ) internal returns (uint) {
+    ) internal view returns (uint) {
         uint prod = assets * totalSupply();
         uint bal = totalAssets();
         if (prod == 0) {
             return assets * 1e8;
         }
-        if (rounding == 0) {
-            if (prod % bal > 0) return (prod / bal) + 1;
-            return prod / bal;
-        }
-        return (prod / bal + 1);
+        if (prod % bal > 0) return (prod / bal) + 1;
+        return prod / bal;
     }
 
     function _convertToAssets(
         uint shares,
         uint8 rounding
-    ) internal returns (uint) {
-        uint prod = (shares * totalAssets()) / 1e8;
-        if (rounding == 0) {
-            if (prod % totalSupply() > 0) return (prod / totalSupply()) + 1;
-            return prod / totalSupply();
-        }
-        return prod / totalSupply() + 1;
+    ) internal view returns (uint) {
+        uint prod = (shares * totalAssets());
+        if (prod % totalSupply() > 0) return (prod / totalSupply()) + 1;
+        return prod / totalSupply();
+        
     }
 
     function set_Position(address _Positions) external onlyOwner {
         Positions = _Positions;
-        approve(Positons, type(uint256).max);
+        approve(Positions, type(uint256).max);
     }
 
     function totalAvailableLiquidity() external view returns (uint) {
-        return (totalAssetsLocked * maxUtilityPercentage) / 100;
+        return (totalAssets()* maxUtilityPercentage) / 100;
     }
 
-    function _checkWithdraw() internal view returns (bool) {
-        (, bytes memory data) = Positions.call(
-            abi.encodeWithSelector("totalOpenIntrest()")
-        );
-        uint totalOpenIntrest = (abi.decode(data, (uint))) / 1e16;
+    function _checkWithdraw() public returns (bool) {
+        uint totalOpenIntrest = 0;
+        totalOpenIntrest=IPosition(Positions).totalOpenIntrest();
+        uint _totalAssets=totalAssets();
         require(
-            ((totalAssetsLocked * maxUtilityPercentage) / 100) >
+            ((_totalAssets * maxUtilityPercentage) / 100) >=
                 totalOpenIntrest
-        );
+         ,"insufficent funds to withdraw");
+        return true;
     }
 }

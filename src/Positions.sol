@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity >=0.8.19;
-import "./AggregatorV3Interface.sol";
-import "@openzeppelin/contracts/interfaces/IERC20.sol";
+import "./AggregatorV3interface.sol";
+import "lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol";
 contract Positions {
     struct Position{
         Position_type pos_type;
@@ -100,7 +100,8 @@ contract Positions {
         _getLeverage(_pos,_id);
         return true;
     }
-    function increasePositionCollateral(Position memory _pos,uint _collateral,uint _id) internal checkLiquidityAvailability() returns(bool){
+    function increasePositionCollateral(uint _id,uint _collateral) external checkLiquidityAvailability() returns(bool){
+        Position memory _pos=_Positions[_id];
         require(_pos.collateral < _collateral,"new collateral should be greater than the older one");
         _pos.collateral=_collateral;
         AssetUnderCollateral.transferFrom(msg.sender,address(this),(_collateral-_pos.collateral));
