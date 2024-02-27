@@ -19,13 +19,14 @@ contract Positions {
         uint openIntrestInTokens;
     }
     enum Position_type{long,short}
-    totalPositionSummary internal Long;
-    totalPositionSummary internal Short;
+    totalPositionSummary public Long;
+    totalPositionSummary public Short;
     AggregatorV3Interface public dataFeed;
     uint private maxLeverage;
-    uint internal Pos;
+    uint internal Pos=1;
     uint8 internal maxUtilizationPercentage;
     uint8 internal liquidatorFeePercentage;
+    uint8 private  nonReentrant; 
     uint80 internal constant  borrowerFeePerSharePerSecond = 31709792;
     address public Vault;
     address public Keeper;
@@ -51,12 +52,21 @@ contract Positions {
         require(msg.sender == _pos.owner,"only owner can call this function");
         _;
     }
+    modifier global_nonReentrant {
+        require(nonReentrant==0);
+        nonReentrant=1;
+        _;
+        nonReentrant=0;
+    }
     function setLiquidatorFeePercentage(uint8 _percentage) external returns(bool){
         require(msg.sender == Keeper);
         liquidatorFeePercentage=_percentage;
         return true;
     }
-    function openLongPosition(uint _size,uint _collateral) external checkLiquidityAvailability() returns(uint){
+    function openPosition(uint _size,uint _collateral , bool isLong) public global_nonReentrant returns(uint){
+        return isLong ? openLongPosition(_size, _collateral) :  openShortPosition(_size, _collateral);
+    }
+    function openLongPosition(uint _size,uint _collateral) internal checkLiquidityAvailability() returns(uint){
         require(_size/_collateral<=maxLeverage);
         Position memory _pos= Position({
             pos_type:Position_type.long,
@@ -75,41 +85,41 @@ contract Positions {
         Long.openings++;
         return Pos++;
     }
-    function increasePositionSize(uint _id,uint _size) external checkLiquidityAvailability() returns(bool){
+    function increasePositionSize(uint _id,uint _size) external checkLiquidityAvailability() global_nonReentrant returns(bool){
         Position memory _pos=_Positions[_id];
        require(_pos.size<_size,"new size should be greater than the older amount");
        uint latestBTCPrice=getBTCPrice();
        if(_pos.pos_type == Position_type.long){
             Long.openIntrestInTokens-=_pos.bal;
-            Long.openIntrest-= (_pos.bal * _pos.BTCPrice);
-            _pos.size=_size ;
-            _pos.bal+=(((_size - _pos.size) *1e16) / latestBTCPrice);
-            Long.openIntrest+= (_pos.bal * _pos.BTCPrice);
-            Long.openIntrestInTokens+=(_size/_pos.BTCPrice);
             _pos.BTCPrice = (_pos.BTCPrice + latestBTCPrice)/2;
+            Long.openIntrest+=(_size - _pos.size)*1e16;
+            
+            _pos.bal+=(((_size - _pos.size) *1e16) / latestBTCPrice);
+            Long.openIntrestInTokens+=_pos.bal;
        }
        else{
-            _pos.size=_size;
             Short.openIntrestInTokens-=_pos.bal;
-            Short.openIntrest-=(_pos.bal * _pos.BTCPrice);
+            _pos.BTCPrice = (_pos.BTCPrice + latestBTCPrice)/2;
+            Short.openIntrest+=(_size - _pos.size)*1e16;
             _pos.bal+=(((_size - _pos.size) *1e16) / latestBTCPrice);
             Short.openIntrestInTokens+=_pos.bal;
-            Short.openIntrest+=(_pos.bal * _pos.BTCPrice);
        }
+       _pos.size=_size ;
         _Positions[_id]=_pos;  
         _getLeverage(_pos,_id);
         return true;
     }
-    function increasePositionCollateral(uint _id,uint _collateral) external checkLiquidityAvailability() returns(bool){
+    function increasePositionCollateral(uint _id,uint _collateral) external checkLiquidityAvailability() global_nonReentrant returns(bool){
         Position memory _pos=_Positions[_id];
         require(_pos.collateral < _collateral,"new collateral should be greater than the older one");
-        _pos.collateral=_collateral;
         AssetUnderCollateral.transferFrom(msg.sender,address(this),(_collateral-_pos.collateral));
+        _pos.collateral=_collateral;
         _Positions[_id]=_pos;
         _getLeverage(_pos,_id);
         return true;
     }
-    function openShortPosition(uint _size,uint _collateral) external checkLiquidityAvailability() returns(uint){
+    
+    function openShortPosition(uint _size,uint _collateral) internal checkLiquidityAvailability() returns(uint){
         require(_size/_collateral<=maxLeverage);
         Position memory _pos= Position({
             pos_type:Position_type.short,
@@ -124,12 +134,12 @@ contract Positions {
         _Positions[Pos]=_pos;
         Short.openIntrest+=_size*1e16;
         Short.openIntrestInTokens+=_pos.bal;
-        AssetUnderCollateral.transferFrom(msg.sender,Vault,_collateral);
+        AssetUnderCollateral.transferFrom(msg.sender,address(this),_collateral);
         _checkLiquidityAvailability();
         Short.openings++;
         return Pos++    ;
     }
-    function decreaseSize(uint _id,uint _size) external returns(bool){
+    function decreaseSize(uint _id,uint _size) external global_nonReentrant() returns(bool){
         Position memory _pos=_Positions[_id];
         if(_size == 0){
             return _liquidate(_pos, _id);
@@ -147,18 +157,17 @@ contract Positions {
         int Pnl=_calculatePnL(_pos);
         int SizeDrecrease= ((int(_pos.size) - int(_size))*1e2)/int(_pos.size);
         Pnl= (Pnl *((SizeDrecrease)/int(_pos.size)))/1e2;
-        Long.openIntrest-=_pos.size *1e16;
-        Long.openIntrest+=_size *1e16;
+        Long.openIntrest-=(_pos.size - _size) *1e16;
         Long.openIntrestInTokens-=_pos.bal;
-        _pos.size=_size;
+        _pos.size=_size;    
         _pos.bal=(_size*1e16/_pos.BTCPrice);
         Long.openIntrestInTokens+=_pos.bal;
         if(Pnl<0){
-            AssetUnderCollateral.transfer(Vault,uint(Pnl));
-            _pos.collateral-=uint(Pnl);
-        }
+            AssetUnderCollateral.transfer(Vault,uint((2 *Pnl)-Pnl));
+            _pos.collateral-=uint((2 *Pnl)-Pnl);
+        }           
         else{
-            AssetUnderCollateral.transfer(msg.sender,uint(Pnl));
+            AssetUnderCollateral.transfer(msg.sender,uint((2 *Pnl)-Pnl));
         }
         _Positions[_id]=_pos;
         _getLeverage(_pos,_id);
@@ -168,8 +177,7 @@ contract Positions {
         int Pnl=_calculatePnL(_pos);
         int SizeDrecrease= ((int(_pos.size) - int(_size))*1e2)/int(_pos.size);
         Pnl= (Pnl *((SizeDrecrease)/int(_pos.size)))/1e2;
-        Short.openIntrest-=_pos.size *1e16;
-        Short.openIntrest+=_size *1e16;
+        Short.openIntrest-=(_pos.size - _size) *1e16;
         Short.openIntrestInTokens-=_pos.bal;
         _pos.size=_size;
         _pos.bal=(_size*1e16/_pos.BTCPrice);
@@ -184,7 +192,7 @@ contract Positions {
         _getLeverage(_pos,_id);
         return true;
     }
-    function decreaseCollateral(uint _id,uint _collateral) external returns(bool){
+    function decreaseCollateral(uint _id,uint _collateral) external global_nonReentrant() returns(bool){
         Position memory _pos=_Positions[_id];
         require(_pos.collateral > _collateral,"collateral should be lesser than the previous one");
         uint bal = _pos.collateral - _collateral;
@@ -196,18 +204,18 @@ contract Positions {
     }
     function _calculatePnL(Position memory _pos) internal view returns(int256) {
         int latestBTCPrice= int(getBTCPrice());
-        int256 PriceDiffer=latestBTCPrice - int(_pos.BTCPrice);
+        int256 PriceDiffer = latestBTCPrice - int(_pos.BTCPrice);
         return int(int(_pos.bal) * PriceDiffer);
     }
     function getBTC(uint amount) public view returns(uint){
         uint price=getBTCPrice();
         return (amount*1e16 / price);
     }
-    function _checkLiquidityAvailability() internal returns(bool){
-        require(totalOpenIntrest() < getLiquidityAvailable(),"not enough liquidity");
+    function _checkLiquidityAvailability() public returns(bool){
+        require(totalOpenIntrest() <= getLiquidityAvailable(),"not enough liquidity");
         return true;
     }
-    function getLiquidityAvailable() internal returns(uint){
+    function getLiquidityAvailable() public  returns(uint){
         (,bytes memory data)= Vault.call(abi.encodeWithSignature("totalAvailableLiquidity()"));
         uint liquidity=abi.decode(data,(uint256));
         return liquidity*1e16;
@@ -219,7 +227,7 @@ contract Positions {
         (,int answer,,,)= dataFeed.latestRoundData();
         return uint256(answer);
     }
-    function liquidate(uint _id) external returns(bool){
+    function liquidate(uint _id) external global_nonReentrant() returns(bool){
         Position memory _pos = _Positions[_id];
         if(msg.sender == _pos.owner){
             return _liquidate(_pos,_id);
@@ -232,23 +240,23 @@ contract Positions {
        if(pnl<0){
         bal = _pos.collateral - uint(pnl/1e16);
         if(bal<0){
-            AssetUnderCollateral.transfer(Vault,_pos.collateral);
             _liquidatorFee(_pos);
+            AssetUnderCollateral.transfer(Vault,_pos.collateral);
         }
         else{
+            borrowerFee(_pos);
+            _liquidatorFee(_pos);
             AssetUnderCollateral.transfer(_pos.owner,bal);
             AssetUnderCollateral.transfer(Vault,(_pos.collateral-bal));
             _pos.collateral-=bal;
-            borrowerFee(_pos);
-            _liquidatorFee(_pos);
         }
        }
        else{
         bal=uint(pnl/1e8);
-        AssetUnderCollateral.transfer(_pos.owner,_pos.collateral);
-        AssetUnderCollateral.transferFrom(Vault,_pos.owner,bal);
         _liquidatorFee(_pos);
         borrowerFee(_pos);
+        AssetUnderCollateral.transfer(_pos.owner,_pos.collateral);
+        AssetUnderCollateral.transferFrom(Vault,_pos.owner,bal);
        }
         if(_pos.pos_type == Position_type.long){
             Long.openIntrest-=_pos.size *1e16;
@@ -293,7 +301,7 @@ contract Positions {
         if(_pos.pos_type==Position_type.long){
             if(latestBTCPrice < _pos.BTCPrice){
                 latestCollateral=_pos.collateral -(((_pos.bal * _pos.BTCPrice)-(_pos.bal * latestBTCPrice))/1e16); 
-                if(_pos.size/latestCollateral < maxLeverage){
+                if(_pos.size/latestCollateral > maxLeverage){
                     _liquidate(_pos,_id);
                     return false;
                 }
@@ -302,12 +310,15 @@ contract Positions {
         else{
             if(_pos.BTCPrice < latestBTCPrice){
                 latestCollateral=_pos.collateral -(((_pos.bal * latestBTCPrice)-(_pos.bal * _pos.BTCPrice))/1e16);
-                if(_pos.size/latestCollateral < maxLeverage){
+                if(_pos.size/latestCollateral > maxLeverage){
                     _liquidate(_pos,_id);
                     return false;
                 }
             }
         }
         return true;
+    }
+    function _getPositionSummary() public view returns(uint, uint,uint,uint){
+        return (Long.openIntrest,Long.openIntrestInTokens,Short.openIntrest,Short.openIntrestInTokens);
     }
 }
